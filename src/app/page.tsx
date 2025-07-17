@@ -40,6 +40,7 @@ export default function Home() {
   const [nextRun, setNextRun] = useState<Date | null>(null);
   const [countdown, setCountdown] = useState("");
   const [isClient, setIsClient] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
 
   useEffect(() => {
     setIsClient(true);
@@ -50,65 +51,104 @@ export default function Home() {
     setLogs(prev => [`[${timestamp}] ${message}`, ...prev].slice(0, 100));
   }, []);
 
+  const validateEnvironment = () => {
+    const requiredVars = {
+      'NEXT_PUBLIC_API_BASE_URL': process.env.NEXT_PUBLIC_API_BASE_URL,
+      'NEXT_PUBLIC_KEEP_ALIVE_EMAIL': process.env.NEXT_PUBLIC_KEEP_ALIVE_EMAIL,
+      'NEXT_PUBLIC_KEEP_ALIVE_PASSWORD': process.env.NEXT_PUBLIC_KEEP_ALIVE_PASSWORD
+    };
+
+    const missingVars = Object.entries(requiredVars)
+      .filter(([_, value]) => !value || value === 'https://your-backend-url.com')
+      .map(([key]) => key);
+
+    return {
+      isValid: missingVars.length === 0,
+      missingVars
+    };
+  };
+
   const keepAlive = useCallback(async () => {
+    const envCheck = validateEnvironment();
+    if (!envCheck.isValid) {
+      const errorMsg = `Missing required environment variables: ${envCheck.missingVars.join(', ')}`;
+      addLog(`❌ ${errorMsg}`);
+      setStatus("error");
+      setIsInitializing(false);
+      return;
+    }
+
     setStatus("running");
     addLog("🚀 Starting keep-alive sequence...");
 
-    const email = process.env.NEXT_PUBLIC_KEEP_ALIVE_EMAIL;
-    const password = process.env.NEXT_PUBLIC_KEEP_ALIVE_PASSWORD;
-    const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
-
-    if (!baseUrl || !email || !password || baseUrl === 'https://your-backend-url.com') {
-        const errorMsg = "Configuration error: Missing or default environment variables. Please update your .env.local file.";
-        addLog(`❌ ${errorMsg}`);
-        setStatus("error");
-        setNextRun(new Date(Date.now() + KEEP_ALIVE_INTERVAL));
-        return;
-    }
-    
     try {
-        addLog("1/3: Attempting to log in...");
-        await api.post("/api/auth/login", { email, password });
-        addLog("✅ Login successful.");
-
-        addLog("2/3: Verifying session...");
-        const meResponse = await api.get("/api/auth/me");
-        addLog(`✅ Session verified for user: ${meResponse.data.email || 'N/A'}`);
-
-        addLog("3/3: Logging out...");
-        await api.post("/api/auth/logout");
-        addLog("✅ Logout successful.");
-
-        addLog("🎉 Keep-alive sequence completed successfully.");
-        setStatus("success");
-        setLastRun(new Date());
-
+      addLog("1/3: Logging in...");
+      const { data: loginData } = await api.post("/api/auth/login", {
+        email: process.env.NEXT_PUBLIC_KEEP_ALIVE_EMAIL,
+        password: process.env.NEXT_PUBLIC_KEEP_ALIVE_PASSWORD
+      });
+      addLog("✅ Login successful");
+      
+      addLog("2/3: Verifying session...");
+      const { data: userData } = await api.get("/api/auth/me");
+      addLog(`✅ Session active for: ${userData.email || 'N/A'}`);
+      
+      addLog("3/3: Logging out...");
+      await api.post("/api/auth/logout");
+      addLog("✅ Logout successful");
+      
+      setStatus("success");
+      setLastRun(new Date());
+      addLog("🔄 Keep-alive cycle completed successfully");
+      
     } catch (error: any) {
-        const errorMessage = error.response?.data?.message || error.message || "An unknown error occurred.";
-        addLog(`❌ Error during sequence: ${errorMessage}`);
-        if (error.response) {
-            addLog(`Status: ${error.response.status} - ${error.response.statusText}`);
+      const errorMessage = error.response?.data?.message || error.message;
+      const statusCode = error.response?.status;
+      
+      addLog(`❌ Error: ${errorMessage} ${statusCode ? `(Status: ${statusCode})` : ''}`);
+      setStatus("error");
+      
+      // If it's an auth error, clear any potential bad session
+      if (statusCode === 401) {
+        try {
+          await api.post("/api/auth/logout");
+          addLog("ℹ️ Cleared invalid session");
+        } catch (e) {
+          // Ignore logout errors
         }
-        setStatus("error");
+      }
     } finally {
-        const next = new Date(Date.now() + KEEP_ALIVE_INTERVAL);
-        setNextRun(next);
-        addLog(`Next run scheduled for ${next.toLocaleTimeString()}.`);
+      const nextRunTime = new Date(Date.now() + KEEP_ALIVE_INTERVAL);
+      setNextRun(nextRunTime);
+      addLog(`⏭️ Next run at: ${nextRunTime.toLocaleTimeString()}`);
+      setIsInitializing(false);
     }
   }, [addLog]);
 
   useEffect(() => {
     if (!isClient) return;
-
-    if (!process.env.NEXT_PUBLIC_API_BASE_URL || !process.env.NEXT_PUBLIC_KEEP_ALIVE_EMAIL || !process.env.NEXT_PUBLIC_KEEP_ALIVE_PASSWORD || process.env.NEXT_PUBLIC_API_BASE_URL === 'https://your-backend-url.com') {
-        addLog("⚠️ Warning: Environment variables are not set or are default. Please create and configure a .env.local file.");
-        setStatus("error");
+    
+    const envCheck = validateEnvironment();
+    if (!envCheck.isValid) {
+      addLog(`❌ Missing environment variables: ${envCheck.missingVars.join(', ')}`);
+      setStatus("error");
+      setIsInitializing(false);
+      return;
     }
 
-    keepAlive(); 
+    // Initial run after 1 second
+    const timeoutId = setTimeout(() => {
+      keepAlive();
+    }, 1000);
+
+    // Set up the interval for subsequent runs
     const intervalId = setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
-    return () => clearInterval(intervalId);
-  }, [isClient, keepAlive, addLog]);
+    
+    return () => {
+      clearTimeout(timeoutId);
+      clearInterval(intervalId);
+    };
+  }, [isClient, keepAlive]);
 
   useEffect(() => {
     if (!isClient) return;
@@ -135,6 +175,17 @@ export default function Home() {
 
   if (!isClient) {
     return null;
+  }
+
+  if (isInitializing) {
+    return (
+      <main className="flex min-h-screen w-full items-center justify-center bg-background p-4">
+        <div className="flex flex-col items-center space-y-4">
+          <div className="h-12 w-12 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
+          <p className="text-muted-foreground">Initializing keep-alive service...</p>
+        </div>
+      </main>
+    );
   }
 
   return (
